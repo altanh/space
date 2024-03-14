@@ -1,9 +1,9 @@
 #pragma once
 
 #include <cstdint>
-#include <cstring>
 #include <iostream>
 #include <limits>
+#include <memory>
 
 namespace space {
 
@@ -33,8 +33,9 @@ template <class Key, class Value, bool Instrument = false> class HashTable {
   size_t capacity;
   size_t mask;
 
-  void *entries;
-  size_t *packed;
+  std::unique_ptr<Key[]> keys;
+  std::unique_ptr<Value[]> values;
+  std::unique_ptr<size_t[]> packed;
 
 public:
   // instrumentation
@@ -47,21 +48,16 @@ public:
         entry_size(tuple_size * sizeof(Key) + sizeof(Value)), lf_num(lf_num),
         lf_den(lf_den), size(0), capacity(capacity), mask(capacity - 1),
         lookups(0), probes(0) {
-    entries = (void *)::operator new(capacity * entry_size);
-    packed = new size_t[capacity];
+    keys = std::make_unique<Key[]>(capacity * tuple_size);
+    values = std::make_unique<Value[]>(capacity);
+    packed = std::make_unique<size_t[]>(capacity);
 
-    // memset to EMPTY_KEY
     for (size_t i = 0; i < capacity; i++) {
-      Key *key = keyAt(i);
-      key[0] = EMPTY_KEY; // this is sufficient
+      keyAt(i)[0] = EMPTY_KEY; // this is sufficient
     }
   }
 
-  ~HashTable() {
-    ::operator delete(entries);
-    delete[] packed;
-  }
-
+  // NB: we assume that the key is not already in the table
   void insert(const Key *key, Value value) {
     if ((size + 1) * lf_den >= lf_num * capacity) {
       resize();
@@ -70,8 +66,21 @@ public:
     while (keyAt(h)[0] != EMPTY_KEY) {
       h = (h + 1) & mask;
     }
-    memcpy((char *)entries + h * entry_size, key, tuple_size * sizeof(Key));
+    std::copy(key, key + tuple_size, keyAt(h));
     (*valueAt(h)) = value;
+    packed[size++] = h;
+  }
+
+  void emplace(const Key *key, Value &&value) {
+    if ((size + 1) * lf_den >= lf_num * capacity) {
+      resize();
+    }
+    size_t h = hash(key);
+    while (keyAt(h)[0] != EMPTY_KEY) {
+      h = (h + 1) & mask;
+    }
+    std::copy(key, key + tuple_size, keyAt(h));
+    (*valueAt(h)) = std::move(value);
     packed[size++] = h;
   }
 
@@ -95,7 +104,16 @@ public:
     return nullptr;
   }
 
-  // TODO: iter()
+  void iter(size_t idx, Key *out) {
+    Key *k = keyAt(packed[idx]);
+    std::copy(k, k + tuple_size, out);
+  }
+
+  void iter(size_t idx, Key *out, Value *val) {
+    Key *k = keyAt(packed[idx]);
+    std::copy(k, k + tuple_size, out);
+    *val = *valueAt(packed[idx]);
+  }
 
   size_t getSize() { return size; }
 
@@ -105,16 +123,18 @@ public:
 
 protected:
   [[gnu::always_inline]] Key *keyAt(size_t idx) {
-    return (Key *)((char *)entries + idx * entry_size);
+    return &keys[idx * tuple_size];
   }
 
-  [[gnu::always_inline]] Key *keyAt(size_t idx, void *array) {
-    return (Key *)((char *)array + idx * entry_size);
+  [[gnu::always_inline]] Key *keyAt(size_t idx, std::unique_ptr<Key[]> &array) {
+    return &array[idx * tuple_size];
   }
 
-  [[gnu::always_inline]] Value *valueAt(size_t idx) {
-    return (Value *)((char *)entries + idx * entry_size +
-                     tuple_size * sizeof(Key));
+  [[gnu::always_inline]] Value *valueAt(size_t idx) { return &values[idx]; }
+
+  [[gnu::always_inline]] Value *valueAt(size_t idx,
+                                        std::unique_ptr<Value[]> &array) {
+    return &array[idx];
   }
 
   [[gnu::always_inline]] bool keyEquals(const Key *x, const Key *y) {
@@ -130,12 +150,13 @@ protected:
     capacity <<= 1;
     mask = capacity - 1;
 
-    void *new_entries = (void *)::operator new(capacity * entry_size);
-    size_t *new_packed = new size_t[capacity];
+    std::unique_ptr<Key[]> new_keys(new Key[capacity * tuple_size]);
+    std::unique_ptr<Value[]> new_values(new Value[capacity]);
+    std::unique_ptr<size_t[]> new_packed(new size_t[capacity]);
 
     // memset to EMPTY_KEY
     for (size_t i = 0; i < capacity; i++) {
-      Key *key = keyAt(i, new_entries);
+      Key *key = keyAt(i, new_keys);
       key[0] = EMPTY_KEY; // this is sufficient
     }
 
@@ -144,18 +165,18 @@ protected:
       size_t idx = packed[i];
       Key *key = keyAt(idx);
       size_t h_new = hash(key);
-      while (keyAt(h_new, new_entries)[0] != EMPTY_KEY) {
+      while (keyAt(h_new, new_keys)[0] != EMPTY_KEY) {
         h_new = (h_new + 1) & mask;
       }
-      memcpy((char *)new_entries + h_new * entry_size,
-             (char *)entries + idx * entry_size, entry_size);
+      std::copy(key, key + tuple_size, keyAt(h_new, new_keys));
+      (*valueAt(h_new, new_values)) = std::move(*valueAt(idx)); // sus?
       new_packed[i] = h_new;
     }
 
-    ::operator delete(entries);
-    delete[] packed;
-    entries = new_entries;
-    packed = new_packed;
+    // move new pointers
+    keys = std::move(new_keys);
+    values = std::move(new_values);
+    packed = std::move(new_packed);
   }
 
   size_t hash(const Key *key) {

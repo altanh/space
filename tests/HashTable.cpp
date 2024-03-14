@@ -51,6 +51,8 @@ bool test_1() {
     }
     if (*v != i) {
       std::cerr << "wrong value: " << k0 << std::endl;
+      std::cerr << "  expected: " << i << std::endl;
+      std::cerr << "  got: " << *v << std::endl;
       return false;
     }
   }
@@ -86,7 +88,7 @@ bool test_2() {
   std::vector<std::tuple<Key, Key>> keys;
 
   // time insert
-  HashTable<Key, Value, /*Instrument=*/true> ht(2, 2, 3);
+  HashTable<Key, Value, /*Instrument=*/true> ht(2, 1, 3);
   std::chrono::high_resolution_clock::time_point t1 =
       std::chrono::high_resolution_clock::now();
   for (size_t i = 0; i < N; i++) {
@@ -103,6 +105,11 @@ bool test_2() {
 
   double insert_time_ms =
       std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t1).count();
+
+  if (ht.getSize() != N) {
+    std::cerr << "wrong size: " << ht.getSize() << std::endl;
+    return false;
+  }
 
   // time lookup
   t1 = std::chrono::high_resolution_clock::now();
@@ -124,6 +131,22 @@ bool test_2() {
   double lookup_time_ms =
       std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t1).count();
 
+  // time iter
+  std::array<Key, 2> out;
+  Value v;
+  t1 = std::chrono::high_resolution_clock::now();
+  for (size_t i = 0; i < N; i++) {
+    ht.iter(i, out.data(), &v);
+    if (v != out[0]) {
+      std::cerr << "wrong value: " << out[0] << std::endl;
+      return false;
+    }
+  }
+  t2 = std::chrono::high_resolution_clock::now();
+
+  double iter_time_ms =
+      std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t1).count();
+
   std::cout << "HashTable test 2 passed" << std::endl;
   std::cout << "  lookups: " << ht.lookups << std::endl;
   std::cout << "  probes: " << ht.probes << std::endl;
@@ -136,6 +159,7 @@ bool test_2() {
             << " MB" << std::endl;
   std::cout << "  insert time: " << insert_time_ms << " ms" << std::endl;
   std::cout << "  lookup time: " << lookup_time_ms << " ms" << std::endl;
+  std::cout << "  iter time: " << iter_time_ms << " ms" << std::endl;
 
   return true;
 }
