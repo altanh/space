@@ -21,6 +21,13 @@ template <class IT, class NT> struct Relation {
   std::shared_ptr<Columnar<IT, NT>> data; // TODO: shared_ptr, probably
 };
 
+// TODO: put this somewhere else?
+template <class NTOut> struct Value;
+template <> struct Value<void> {};
+template <class NTOut> struct Value {
+  NTOut some;
+};
+
 template <class IT, class NT> class LazyTrie {
   Relation<IT, NT> relation;
   bool is_suffix;
@@ -30,23 +37,33 @@ template <class IT, class NT> class LazyTrie {
 
   std::unique_ptr<size_t[]> dim_keys;
 
+  // TODO(@altanh): experiment with storing the Trie directly in the HashTable,
+  //                can avoid some indirections
   std::unique_ptr<HashTable<IT, std::unique_ptr<LazyTrie<IT, NT>>>> map;
   std::unique_ptr<std::vector<size_t>> vec;
 
 public:
   // Top-level Trie case
-  // LazyTrie(Relation<IT, NT> rel, Schema schema) : LazyTrie(rel, schema, true)
-  // {}
+  LazyTrie(Relation<IT, NT> rel, Schema schema) : LazyTrie(rel, schema, true) {}
 
-  LazyTrie(Relation<IT, NT> rel, Schema schema, bool root)
-  // : relation(rel), schema(schema), vars(schema[0]), nvars(vars.size()),
-  //   is_suffix(isSuffix(vars, rel.vars))
-  {
+  LazyTrie(Relation<IT, NT> rel, Schema schema, bool root) {
+    std::cout << "Making Trie with schema: ";
+    for (const auto &vars : schema) {
+      std::cout << "[";
+      if (vars.size() > 0) {
+        std::cout << vars[0];
+      }
+      for (size_t i = 1; i < vars.size(); ++i) {
+        std::cout << ", " << vars[i];
+      }
+      std::cout << "]";
+    }
+    std::cout << std::endl;
     this->relation = rel;
     this->schema = schema;
-    this->vars = schema[0];
+    this->vars = schema.empty() ? std::vector<Variable>{} : schema[0];
     this->nvars = vars.size();
-    this->is_suffix = isSuffix(vars, rel.vars);
+    this->is_suffix = _isSuffix(vars, rel.vars);
 
     map = nullptr;
     if (root) {
@@ -56,19 +73,22 @@ public:
     }
 
     dim_keys = std::make_unique<size_t[]>(nvars);
-    size_t var = 0;
-    for (size_t i = 0; i < relation.vars.size(); i++) {
-      if (relation.vars[i] == vars[var]) {
-        dim_keys[var] = i;
-        var++;
-        if (var == nvars) {
-          break;
+    if (nvars > 0) {
+      size_t var = 0;
+      for (size_t i = 0; i < relation.vars.size(); i++) {
+        if (relation.vars[i] == vars[var]) {
+          dim_keys[var] = i;
+          var++;
+          if (var == nvars) {
+            break;
+          }
         }
       }
     }
   }
 
-  template <class NTOut> void iter(size_t idx, IT *out, NTOut *val) {
+  template <class ITOut, class NTOut>
+  void iter(size_t idx, ITOut *out, Value<NTOut> *val) {
     // TODO: will we ever need to fetch the value for a map?
     if (map) {
       map->iter(idx, out);
@@ -78,7 +98,7 @@ public:
         out[i] = relation.data->dim(dim_keys[i])[item];
       }
       if constexpr (!(std::is_void<NTOut>::value || std::is_void<NT>::value)) {
-        *val = *relation.data->val(item);
+        val->some = *relation.data->val(item);
       }
     } else {
       force();
@@ -106,9 +126,17 @@ public:
     }
   }
 
+  size_t getNumVars() const { return nvars; }
+
+  const Schema &getSchema() const { return schema; }
+
+  const Relation<IT, NT> &getRelation() const { return relation; }
+
+  bool isSuffix() const { return is_suffix; }
+
 protected:
-  static bool isSuffix(std::vector<Variable> smaller,
-                       std::vector<Variable> larger) {
+  static bool _isSuffix(std::vector<Variable> smaller,
+                        std::vector<Variable> larger) {
     const size_t n = smaller.size();
     const size_t m = larger.size();
     for (size_t i = 0; i < n; i++) {
@@ -141,7 +169,7 @@ protected:
           map->emplace(key, std::make_unique<LazyTrie<IT, NT>>(
                                 relation, new_schema, false));
         }
-        map->lookup(key)->get()->vec->push_back(i);
+        (*map->lookup(key))->vec->push_back(i);
       }
     } else {
       for (size_t i : *vec) {
@@ -154,12 +182,42 @@ protected:
           map->emplace(key, std::make_unique<LazyTrie<IT, NT>>(
                                 relation, new_schema, false));
         }
-        map->lookup(key)->get()->vec->push_back(i);
+        (*map->lookup(key))->vec->push_back(i);
       }
       vec = nullptr;
     }
   }
 };
+
+// Type-erased list of tries parametrized by output types
+// template <class ITOut, class NTOut> class TrieList {
+//   // Interface
+//   class TrieInterface {
+//   public:
+//     virtual void iter(size_t idx, ITOut *out, Value<NTOut> *val) = 0;
+//     virtual TrieInterface *lookup(ITOut *key) = 0;
+//     virtual size_t getSize() = 0;
+//     virtual size_t getNumVars() const = 0;
+//     virtual const Schema &getSchema() const = 0;
+//     virtual bool isSuffix() const = 0;
+//   };
+
+//   // Derived type
+//   template <class IT, class NT> class TrieImpl : public TrieInterface {
+//     LazyTrie<IT, NT> *trie;
+
+//   public:
+//     TrieImpl(LazyTrie<IT, NT> *trie) : trie(trie) {}
+
+//     void iter(size_t idx, ITOut *out, Value<NTOut> *val) override {
+//       trie->iter(idx, out, val);
+//     }
+
+//     TrieInterface *lookup(ITOut *key) override {
+//       return new TrieImpl<IT, NT>(trie->lookup(key));
+//     }
+//   }
+// };
 
 // A(i,j) stored as CSR:
 // Trie(A, [[i], [j]])
