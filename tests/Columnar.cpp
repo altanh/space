@@ -93,7 +93,7 @@ bool test_no_value() {
   return true;
 }
 
-int main(int argc, char **argv) {
+int main() {
   if (!test_coo()) {
     return 1;
   }

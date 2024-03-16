@@ -1,5 +1,7 @@
 #pragma once
 
+#include <algorithm>
+#include <memory>
 #include <space/format/Trie.h>
 #include <unordered_map>
 #include <unordered_set>
@@ -11,6 +13,8 @@ struct Atom {
   Variable relation;
   std::vector<Variable> vars;
 
+  Atom() = default;
+
   Atom(Variable relation, std::vector<Variable> vars)
       : relation(relation), vars(vars) {}
 };
@@ -20,19 +24,108 @@ using FreeJoinPlan = std::vector<JoinNode>;
 
 namespace detail {
 
+using std::unique_ptr;
 using std::unordered_map;
+using std::unordered_set;
 using std::vector;
+
+// Trying to pre-allocate stuff. Trying to outsmart the allocator. This probably
+// just makes things worse, but I'm in too deep now!
+template <class IT, class NT> struct FJAux {
+  struct FrameAux {
+    unique_ptr<Dim[]> trie_perm;
+    unique_ptr<LazyTrie<IT, NT> *[]> all_tries;
+    unique_ptr<LazyTrie<IT, NT> *[]> subtries;
+  };
+
+  vector<unique_ptr<Dim[]>> arrs;
+  vector<unique_ptr<LazyTrie<IT, NT>>> tries;
+  unique_ptr<IT[]> tuple;
+  unique_ptr<IT[]> key;
+  unique_ptr<FrameAux[]> frames;
+
+  void alloc(Dim vars, Dim nodes, Dim relations) {
+    tuple = std::make_unique<IT[]>(vars);
+    key = std::make_unique<IT[]>(vars);
+    frames = std::make_unique<FrameAux[]>(nodes + 1);
+    for (Dim i = 0; i < nodes + 1; ++i) {
+      frames[i].trie_perm = std::make_unique<Dim[]>(relations);
+      frames[i].all_tries = std::make_unique<LazyTrie<IT, NT> *[]>(relations);
+      frames[i].subtries = std::make_unique<LazyTrie<IT, NT> *[]>(relations);
+    }
+    for (size_t i = 0; i < tries.size(); ++i) {
+      frames[0].all_tries[i] = tries[i].get();
+    }
+  }
+};
 
 struct FJ {
   vector<Variable> head_vars;
+  // TODO(@altanh): try using (padded) flat arrays instead
   // offsets into all_tries; tries[i][0] is the cover trie for the i-th node
   vector<vector<size_t>> tries;
   // proj[i][j][k] is the index of the k-th variable of the j-th atom of the
   // i-th node in the output tuple
   vector<vector<vector<size_t>>> proj;
+  // number of covers in each node
+  vector<size_t> num_covers;
 
   template <class IT, class NT>
-  void print(const vector<LazyTrie<IT, NT> *> &all_tries) {
+  static FJ make(const vector<unique_ptr<LazyTrie<IT, NT>>> &all_tries,
+                 const FreeJoinPlan &plan) {
+    FJ fj;
+
+    // Collect head variables from covers; this is our output schema.
+    // For now it is flattened (i.e. columnar) but one could feasibly return it
+    // as in factorized form as a trie.
+    unordered_map<Variable, size_t> var_to_idx;
+    for (const auto &node : plan) {
+      const auto &atom = node[0];
+      for (const auto &var : atom.vars) {
+        fj.head_vars.push_back(var);
+        var_to_idx[var] = fj.head_vars.size() - 1;
+      }
+    }
+
+    // For each node, find indices of tries
+    for (const auto &node : plan) {
+      vector<size_t> node_tries;
+      size_t num_covers = 0;
+      for (const auto &atom : node) {
+        for (size_t i = 0; i < all_tries.size(); i++) {
+          if (all_tries[i]->getRelation().name == atom.relation) {
+            node_tries.push_back(i);
+            break;
+          }
+        }
+        if (atom.vars.size() == node[0].vars.size()) {
+          num_covers++;
+        }
+      }
+      fj.num_covers.push_back(num_covers);
+      fj.tries.push_back(std::move(node_tries));
+    }
+
+    // For each node, find projection indices
+    for (const auto &node : plan) {
+      vector<vector<size_t>> node_proj;
+      for (const auto &atom : node) {
+        vector<size_t> atom_proj;
+        for (const auto &var : atom.vars) {
+          atom_proj.push_back(var_to_idx[var]);
+        }
+        node_proj.push_back(std::move(atom_proj));
+      }
+      fj.proj.push_back(std::move(node_proj));
+    }
+
+    // fj.print(all_tries);
+
+    return fj;
+  }
+
+  template <class IT, class NT>
+  void print(const vector<unique_ptr<LazyTrie<IT, NT>>> &all_tries) {
     for (size_t i = 0; i < tries.size(); ++i) {
       std::cout << "Node " << i << std::endl;
       for (size_t j = 0; j < tries[i].size(); ++j) {
@@ -49,90 +142,95 @@ struct FJ {
   }
 };
 
-template <class IT, class NT>
-FJ preprocessFJ(const std::vector<LazyTrie<IT, NT> *> &all_tries,
-                const FreeJoinPlan &plan) {
-  FJ fj;
-
-  // Collect head variables from covers; this is our output schema.
-  unordered_map<Variable, size_t> var_to_idx;
-  for (const auto &node : plan) {
-    const auto &atom = node[0];
-    for (const auto &var : atom.vars) {
-      fj.head_vars.push_back(var);
-      var_to_idx[var] = fj.head_vars.size() - 1;
-    }
-  }
-
-  // For each node, find indices of tries
-  for (const auto &node : plan) {
-    vector<size_t> node_tries;
-    for (const auto &atom : node) {
-      for (size_t i = 0; i < all_tries.size(); i++) {
-        if (all_tries[i]->getRelation().name == atom.relation) {
-          node_tries.push_back(i);
-          break;
-        }
-      }
-    }
-    fj.tries.push_back(std::move(node_tries));
-  }
-
-  // For each node, find projection indices
-  for (const auto &node : plan) {
-    vector<vector<size_t>> node_proj;
-    for (const auto &atom : node) {
-      vector<size_t> atom_proj;
-      for (const auto &var : atom.vars) {
-        atom_proj.push_back(var_to_idx[var]);
-      }
-      node_proj.push_back(std::move(atom_proj));
-    }
-    fj.proj.push_back(std::move(node_proj));
-  }
-
-  fj.print(all_tries);
-
-  return fj;
-}
-
 template <class IT, class NT, class Output>
-void FreeJoin(const vector<LazyTrie<IT, NT> *> &all_tries, const FJ &plan,
-              Output output, IT *tuple, Value<NT> *value, size_t node,
-              IT *workspace) {
+void FreeJoin(const FJ &plan, Output output, IT *tuple, Value<NT> value,
+              size_t node, FJAux<IT, NT> *aux) {
   if (node == plan.tries.size()) {
     output(tuple, value);
     return;
   }
 
+  const auto &all_tries = aux->frames[node].all_tries;
+
+  // TODO: allocations
+  // auto node_tries = plan.tries[node];
+  // auto proj = plan.proj[node];
   const auto &node_tries = plan.tries[node];
+  const auto &proj = plan.proj[node];
+
+  // std::vector<Dim> trie_perm;
+  // trie_perm.reserve(node_tries.size());
+  // for (Dim i = 0; i < node_tries.size(); ++i) {
+  //   trie_perm.push_back(i);
+  // }
+  auto &trie_perm = aux->frames[node].trie_perm;
+  for (Dim i = 0; i < node_tries.size(); ++i) {
+    trie_perm[i] = i;
+  }
+
   // TODO: choose "smallest" cover using vector estimate per paper
   // TODO: there is an interesting tradeoff here
-  LazyTrie<IT, NT> *cover = all_tries[node_tries[0]];
-  const size_t cover_size = cover->getSize();
-  IT *cover_tuple = tuple + plan.proj[node][0][0];
+
+  // covers are all_tries[node_tries[0:plan.num_covers[node]]
+  {
+    size_t cover_size = std::numeric_limits<size_t>::max();
+    size_t cover_idx = 0;
+    for (size_t i = 0; i < plan.num_covers[node]; ++i) {
+      size_t size = all_tries[node_tries[i]]->getEstimatedSize();
+      if (size < cover_size) {
+        cover_size = size;
+        cover_idx = i;
+      }
+    }
+    std::swap(trie_perm[0], trie_perm[cover_idx]);
+    // std::swap(node_tries[0], node_tries[cover_idx]);
+    // std::swap(proj[0], proj[cover_idx]);
+
+    // sort the rest by size
+    // std::sort(trie_perm.begin() + 1, trie_perm.end(),
+    //           [&all_tries](Dim a, Dim b) {
+    //             return all_tries[a]->getMapSize() <
+    //             all_tries[b]->getMapSize();
+    //           });
+  }
+
+  // TODO: allocations
+  // vector<LazyTrie<IT, NT> *> subtries(node_tries.size(), nullptr);
+  // vector<LazyTrie<IT, NT> *> new_tries(all_tries);
+
+  auto &subtries = aux->frames[node].subtries;
+  auto &new_tries = aux->frames[node + 1].all_tries;
+  for (size_t i = 0; i < aux->tries.size(); ++i) {
+    new_tries[i] = all_tries[i];
+  }
+
+  // LazyTrie<IT, NT> *cover = all_tries[node_tries[0]];
+  LazyTrie<IT, NT> *cover = all_tries[node_tries[trie_perm[0]]];
+  // IT *cover_tuple = tuple + proj[0][0];
+  IT *cover_tuple = tuple + proj[trie_perm[0]][0];
   Value<NT> v;
 
-  vector<LazyTrie<IT, NT> *> subtries(node_tries.size(), nullptr);
-  vector<LazyTrie<IT, NT> *> new_tries(all_tries);
-
+  const size_t cover_size = cover->getIterSize();
   for (size_t i = 0; i < cover_size; ++i) {
     cover->iter(i, cover_tuple, &v);
     // now tuple is filled upto cover
-    if (cover->isSuffix()) {
-      value->some *= v.some;
+    if (cover->isLastCover()) {
+      value.some *= v.some;
       subtries[0] = nullptr;
     } else {
       subtries[0] = cover->lookup(cover_tuple);
     }
     bool miss = false;
     for (size_t j = 1; j < node_tries.size(); ++j) {
-      LazyTrie<IT, NT> *trie = all_tries[node_tries[j]];
+      // LazyTrie<IT, NT> *trie = all_tries[node_tries[j]];
+      LazyTrie<IT, NT> *trie = all_tries[node_tries[trie_perm[j]]];
       // project tuple down to keys for trie
-      for (size_t k = 0; k < plan.proj[node][j].size(); ++k) {
-        workspace[k] = tuple[plan.proj[node][j][k]];
+      // const auto &trie_proj = proj[j];
+      const auto &trie_proj = proj[trie_perm[j]];
+      for (size_t k = 0; k < trie_proj.size(); ++k) {
+        aux->key[k] = tuple[trie_proj[k]];
       }
-      LazyTrie<IT, NT> *subtrie = trie->lookup(workspace);
+      LazyTrie<IT, NT> *subtrie = trie->lookup(aux->key.get());
       if (!subtrie) {
         miss = true;
         break;
@@ -144,80 +242,114 @@ void FreeJoin(const vector<LazyTrie<IT, NT> *> &all_tries, const FJ &plan,
     }
     // update all_tries
     for (size_t j = 0; j < node_tries.size(); ++j) {
-      new_tries[node_tries[j]] = subtries[j];
+      // new_tries[node_tries[j]] = subtries[j];
+      new_tries[node_tries[trie_perm[j]]] = subtries[j];
     }
-    FreeJoin(new_tries, plan, output, tuple, value, node + 1, workspace);
+    FreeJoin(plan, output, tuple, value, node + 1, aux);
+  }
+}
+
+template <class IT, class NT>
+bool isValidPlan(const vector<Relation<IT, NT>> &relations,
+                 const FreeJoinPlan &plan) {
+  unordered_map<Variable, unordered_set<Variable>> rel_vars;
+  for (const auto &rel : relations) {
+    for (const auto &var : rel.vars) {
+      rel_vars[rel.name].insert(var);
+    }
+  }
+  for (const auto &node : plan) {
+    unordered_set<Variable> seen_rels;
+    unordered_set<Variable> cover_vars(node[0].vars.begin(),
+                                       node[0].vars.end());
+    for (const auto &atom : node) {
+      // check that the same relation does not appear in multiple atoms
+      if (seen_rels.count(atom.relation)) {
+        std::cerr << "Relation " << atom.relation
+                  << " appears multiple times in the same node" << std::endl;
+        return false;
+      }
+      // check that all variables are bound at most once, and atom 0 is a cover
+      seen_rels.insert(atom.relation);
+      for (const auto &var : atom.vars) {
+        if (!cover_vars.count(var)) {
+          std::cerr << "Variable " << var << " is not covered for "
+                    << atom.relation << std::endl;
+          return false;
+        }
+        if (!rel_vars[atom.relation].count(var)) {
+          std::cerr << "Variable " << var << " is bound multiple times for "
+                    << atom.relation << std::endl;
+          return false;
+        }
+        rel_vars[atom.relation].erase(var);
+      }
+    }
+  }
+  // check that all variables are bound at least once
+  for (const auto &rel : relations) {
+    if (!rel_vars[rel.name].empty()) {
+      std::cerr << "Relation " << rel.name << " has unbound variables:";
+      for (const auto &var : rel_vars[rel.name]) {
+        std::cerr << " " << var;
+      }
+      std::cerr << std::endl;
+      return false;
+    }
+  }
+  return true;
+}
+
+template <class IT, class NT>
+void buildTries(vector<Relation<IT, NT>> &relations, const FreeJoinPlan &plan,
+                FJAux<IT, NT> *aux) {
+  // Compute trie schemas and cover information
+  unordered_map<Variable, Schema> schemas;
+  unordered_map<Variable, bool> is_cover;
+  for (const auto &node : plan) {
+    for (const auto &atom : node) {
+      schemas[atom.relation].push_back(atom.vars);
+      // check if atom is a cover; the final value will be true iff the last
+      // subatom of a relation is also a cover of its node.
+      is_cover[atom.relation] = atom.vars.size() == node[0].vars.size();
+    }
+  }
+  // Create tries
+  auto &tries = aux->tries;
+  for (auto &rel : relations) {
+    aux->arrs.emplace_back(nullptr);
+    aux->arrs.emplace_back(nullptr);
+    auto &nvars_out = aux->arrs[aux->arrs.size() - 2];
+    auto &perm_out = aux->arrs[aux->arrs.size() - 1];
+    tries.push_back(std::make_unique<LazyTrie<IT, NT>>(
+        LazyTrie<IT, NT>::fromSchema(&rel, schemas[rel.name],
+                                     is_cover[rel.name], &nvars_out,
+                                     &perm_out)));
   }
 }
 
 } // namespace detail
 
 template <class IT, class NT, class Output>
-void FreeJoin(std::vector<LazyTrie<IT, NT> *> tries, const FreeJoinPlan &plan,
-              Output output) {
-  // Preprocess
-  detail::FJ fj = detail::preprocessFJ(tries, plan);
-  // TODO: NT *tuple = new NT[batch_size * nvars];
-  IT *tuple = new IT[fj.head_vars.size()];
-  IT *workspace = new IT[fj.head_vars.size()];
-  Value<NT> value;
-  detail::FreeJoin(tries, fj, output, tuple, &value, 0, workspace);
-  delete[] tuple;
-  delete[] workspace;
-}
-
-template <class IT, class NT, class Output>
-void FreeJoin(const std::vector<Relation<IT, NT>> &relations,
+void FreeJoin(std::vector<Relation<IT, NT>> &relations,
               const FreeJoinPlan &plan, Output output) {
-  // Compute trie schemas
-  std::unordered_map<Variable, Schema> schemas;
-  for (const auto &node : plan) {
-    for (const auto &atom : node) {
-      schemas[atom.relation].push_back(atom.vars);
-    }
+  // Validate plan
+  if (!detail::isValidPlan(relations, plan)) {
+    throw std::runtime_error("Invalid plan");
   }
-  // Create tries
-  std::vector<LazyTrie<IT, NT> *> tries;
-  for (const auto &rel : relations) {
-    std::unordered_map<Variable, size_t> var_to_idx;
-    for (size_t i = 0; i < rel.vars.size(); ++i) {
-      var_to_idx[rel.vars[i]] = i;
-    }
-    std::vector<Variable> transposed_vars;
-    std::unique_ptr<size_t[]> perm =
-        std::make_unique<size_t[]>(rel.vars.size());
-    size_t i = 0;
-    for (const auto &vars : schemas[rel.name]) {
-      for (const auto &var : vars) {
-        transposed_vars.push_back(var);
-        perm[i++] = var_to_idx[var];
-      }
-    }
-    // print permutation
-    for (size_t i = 0; i < rel.vars.size(); ++i) {
-      std::cout << perm[i] << " ";
-    }
-    std::cout << std::endl;
-    // use transposed relation
-    Relation<IT, NT> transposed = {
-        rel.name, transposed_vars,
-        std::make_shared<Columnar<IT, NT>>(*rel.data, std::move(perm))};
-    tries.push_back(new LazyTrie<IT, NT>(transposed, schemas[rel.name]));
-  }
+
+  // Build tries
+  detail::FJAux<IT, NT> aux;
+  detail::buildTries(relations, plan, &aux);
 
   // Preprocess
-  detail::FJ fj = detail::preprocessFJ(tries, plan);
-  // TODO: NT *tuple = new NT[batch_size * nvars];
-  IT *tuple = new IT[fj.head_vars.size()];
-  IT *workspace = new IT[fj.head_vars.size()];
-  Value<NT> value = {1.0};
-  detail::FreeJoin(tries, fj, output, tuple, &value, 0, workspace);
-  delete[] tuple;
-  delete[] workspace;
+  detail::FJ fj = detail::FJ::make(aux.tries, plan);
 
-  for (auto trie : tries) {
-    delete trie;
-  }
+  // Allocate auxiliary memory
+  aux.alloc(fj.head_vars.size(), plan.size(), relations.size());
+
+  // Run the join
+  detail::FreeJoin(fj, output, aux.tuple.get(), Value<NT>(), 0, &aux);
 }
 
 } // namespace space

@@ -49,7 +49,7 @@ bool test_1() {
       std::cerr << "key not found: " << k0 << std::endl;
       return false;
     }
-    if (*v != i) {
+    if (static_cast<size_t>(*v) != i) {
       std::cerr << "wrong value: " << k0 << std::endl;
       std::cerr << "  expected: " << i << std::endl;
       std::cerr << "  got: " << *v << std::endl;
@@ -121,7 +121,7 @@ bool test_2() {
       std::cerr << "key not found: " << k0 << ", " << k1 << std::endl;
       return false;
     }
-    if (*v != i) {
+    if (static_cast<size_t>(*v) != i) {
       std::cerr << "wrong value: " << k0 << ", " << k1 << std::endl;
       return false;
     }
@@ -137,7 +137,7 @@ bool test_2() {
   t1 = std::chrono::high_resolution_clock::now();
   for (size_t i = 0; i < N; i++) {
     ht.iter(i, out.data(), &v);
-    if (v != out[0]) {
+    if (v != static_cast<Value>(out[0])) {
       std::cerr << "wrong value: " << out[0] << std::endl;
       return false;
     }
@@ -164,7 +164,7 @@ bool test_2() {
   return true;
 }
 
-int main(int argc, char **argv) {
+int main() {
   if (!test_1()) {
     return 1;
   }

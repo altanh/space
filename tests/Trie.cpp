@@ -28,9 +28,8 @@ void printSchema(const Schema &schema) {
 }
 
 void printTrie(LazyTrie<IT, NT> &trie, size_t level, size_t max_level) {
-  const size_t size = trie.getSize();
+  const size_t size = trie.getIterSize();
   std::unique_ptr<IT[]> key = std::make_unique<IT[]>(trie.getNumVars());
-
   for (size_t i = 0; i < size; ++i) {
     Value<NT> value;
     trie.iter<IT, NT>(i, key.get(), &value);
@@ -58,47 +57,49 @@ void printTrie(LazyTrie<IT, NT> &trie, size_t level, size_t max_level) {
   }
 }
 
-int main(int argc, char **argv) {
+int main() {
   auto coo = vector<array<IT, 3>>{
       {1, 2, 3},
       {1, 2, 6},
       {7, 8, 9},
   };
-  auto data = std::make_shared<Columnar<IT, NT>>(
-      Columnar<IT, NT>::fromCOO(coo, [](auto x) { return x[0] + x[1]; }));
-  Relation<IT, NT> A = {"A", {"x", "y", "z"}, data};
+  auto data =
+      Columnar<IT, NT>::fromCOO(coo, [](auto x) { return x[0] + x[1]; });
+  Relation<IT, NT> A = {"A", {"x", "y", "z"}, &data};
+
+  std::unique_ptr<Dim[]> nvars;
+  std::unique_ptr<Dim[]> perm;
 
   Schema s1;
   s1.push_back({"x", "y"});
   s1.push_back({"z"});
-  LazyTrie<IT, NT> t1(A, s1);
-  printSchema(t1.getSchema());
-  printTrie(t1, 0, t1.getSchema().size() - 1);
+  auto t1 = LazyTrie<IT, NT>::fromSchema(&A, s1, true, &nvars, &perm);
+  t1.printSchema();
+  printTrie(t1, 0, t1.getNumLevels() - 1);
   std::cout << std::endl;
 
   Schema s2;
   s2.push_back({"x"});
   s2.push_back({"y", "z"});
-  s2.push_back({});
-  LazyTrie<IT, NT> t2(A, s2);
-  printSchema(t2.getSchema());
-  printTrie(t2, 0, t2.getSchema().size() - 1);
+  auto t2 = LazyTrie<IT, NT>::fromSchema(&A, s2, true, &nvars, &perm);
+  t2.printSchema();
+  printTrie(t2, 0, t2.getNumLevels() - 1);
   std::cout << std::endl;
 
   Schema s3;
   s3.push_back({"x"});
   s3.push_back({"y"});
   s3.push_back({"z"});
-  LazyTrie<IT, NT> t3(A, s3);
-  printSchema(t3.getSchema());
-  printTrie(t3, 0, t3.getSchema().size() - 1);
+  auto t3 = LazyTrie<IT, NT>::fromSchema(&A, s3, true, &nvars, &perm);
+  t3.printSchema();
+  printTrie(t3, 0, t3.getNumLevels() - 1);
   std::cout << std::endl;
 
   Schema s4;
   s4.push_back({"x", "y", "z"});
-  LazyTrie<IT, NT> t4(A, s4);
-  printSchema(t4.getSchema());
-  printTrie(t4, 0, t4.getSchema().size() - 1);
+  auto t4 = LazyTrie<IT, NT>::fromSchema(&A, s4, true, &nvars, &perm);
+  t4.printSchema();
+  printTrie(t4, 0, t4.getNumLevels() - 1);
   std::cout << std::endl;
 
   return 0;
