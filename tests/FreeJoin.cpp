@@ -78,12 +78,12 @@ void testER() {
   constexpr double p = 0.1;
 
   std::vector<size_t> Ns;
-  for (size_t i = 100; i <= 5100; i += 500) {
+  for (size_t i = 100; i <= 3100; i += 500) {
     Ns.push_back(i);
   }
 
-  auto plan = parsePlan("[R(x, y), S(y), T(x)], [S(z), T(z)]");
-  // auto plan = parsePlan("[R(x), T(x)], [R(y), S(y)], [S(z), T(z)]");
+  // auto plan = parsePlan("[R(x, y), S(y), T(x)], [S(z), T(z)]");
+  auto plan = parsePlan("[R(x), T(x)], [R(y), S(y)], [S(z), T(z)]");
   // auto plan = parsePlan("[R(x, y), S(y)], [S(z), T(z)]");
 
   std::cout << "n,m,triangles,time_s" << std::endl;
@@ -158,7 +158,7 @@ void testWorstCase() {
 }
 
 int main(int argc, char **argv) {
-  // testER();
-  testWorstCase();
+  testER();
+  // testWorstCase();
   return 0;
 }

@@ -152,25 +152,19 @@ void FreeJoin(const FJ &plan, Output output, IT *tuple, Value<NT> value,
 
   const auto &all_tries = aux->frames[node].all_tries;
 
-  // TODO: allocations
   // auto node_tries = plan.tries[node];
   // auto proj = plan.proj[node];
   const auto &node_tries = plan.tries[node];
   const auto &proj = plan.proj[node];
 
-  // std::vector<Dim> trie_perm;
-  // trie_perm.reserve(node_tries.size());
-  // for (Dim i = 0; i < node_tries.size(); ++i) {
-  //   trie_perm.push_back(i);
-  // }
+  // TODO: is this worth it, or should I just permute the tries in place?
   auto &trie_perm = aux->frames[node].trie_perm;
   for (Dim i = 0; i < node_tries.size(); ++i) {
     trie_perm[i] = i;
   }
 
-  // TODO: choose "smallest" cover using vector estimate per paper
   // TODO: there is an interesting tradeoff here
-
+  // TODO: allow repeated binding of variables to recover binary joins?
   // covers are all_tries[node_tries[0:plan.num_covers[node]]
   {
     size_t cover_size = std::numeric_limits<size_t>::max();

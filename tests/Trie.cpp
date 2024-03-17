@@ -102,5 +102,17 @@ int main() {
   printTrie(t4, 0, t4.getNumLevels() - 1);
   std::cout << std::endl;
 
+  // [x, y], [z]
+  StaticLazyTrie<IT, NT, true, true, std::index_sequence<2, 1>,
+                 std::index_sequence<0, 1, 2>>
+      st(&data);
+  st.print();
+
+  // [z], [y], [x]
+  StaticLazyTrie<IT, NT, true, true, std::index_sequence<1, 1, 1>,
+                 std::index_sequence<2, 1, 0>>
+      st2(&data);
+  st2.print();
+
   return 0;
 }

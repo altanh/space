@@ -5,6 +5,7 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "Columnar.h"
@@ -250,6 +251,256 @@ protected:
                                         perm + this_nvars, relation));
         }
         // (*map->lookup(key))->vec->push_back(index);
+        map->lookup(key)->vec->push_back(index);
+      }
+      vec = nullptr;
+    }
+  }
+};
+
+// Trie with compile-time schema, provided as a parameter pack of ints
+// Schema[i] is the number of variables at level i.
+// Perm[j] has length sum(Schema), and maps trie variable j to the relation.
+template <class IT, class NT, bool Root, bool LeafCover, typename Schema,
+          typename Perm>
+class StaticLazyTrie;
+
+// Base case: no variables
+template <class IT, class NT, bool Root, bool LeafCover, size_t... Ps>
+class StaticLazyTrie<IT, NT, Root, LeafCover, std::index_sequence<>,
+                     std::index_sequence<Ps...>> {
+  // Make friends.
+  template <class IT2, class NT2, bool R, bool LC, typename S, typename P>
+  friend class StaticLazyTrie;
+
+  Columnar<IT, NT> *data;
+
+  template <typename T> using ptr = std::unique_ptr<T>;
+  template <typename T> using vector = std::vector<T>;
+  template <typename T, size_t M> using array = std::array<T, M>;
+  template <size_t... is> using iseq = std::index_sequence<is...>;
+
+  using Map = StaticHashTable<
+      IT, StaticLazyTrie<IT, NT, false, LeafCover, iseq<>, iseq<Ps...>>, 0>;
+  using Tuple = array<IT, 0>;
+
+  // No map needed.
+  ptr<vector<size_t>> vec;
+
+public:
+  StaticLazyTrie() = default;
+
+  StaticLazyTrie(StaticLazyTrie &&other) = default;
+
+  // Move assignment
+  StaticLazyTrie &operator=(StaticLazyTrie &&other) = default;
+
+  StaticLazyTrie(Columnar<IT, NT> *data) : data(data) {
+    if constexpr (Root) {
+      vec = nullptr;
+    } else {
+      vec = std::make_unique<vector<size_t>>();
+    }
+  }
+
+  template <class ITOut, class NTOut>
+  void iter(size_t idx, array<ITOut, 0> &out, Value<NTOut> &val) {
+    size_t item = Root ? idx : (*vec)[idx];
+    if constexpr (!(std::is_void<NTOut>::value || std::is_void<NT>::value)) {
+      val.some = *data->val(item);
+    }
+  }
+
+  size_t getIterSize() { return Root ? data->getSize() : vec->size(); }
+
+  size_t getMapSize() { return 0; }
+
+  size_t getEstimatedSize() const { return getIterSize(); }
+
+  void print(size_t level = 0) {
+    const size_t size = getIterSize();
+    Tuple key;
+    for (size_t i = 0; i < size; ++i) {
+      Value<NT> value;
+      iter(i, key, value);
+      for (size_t j = 0; j < level; ++j) {
+        std::cout << "    ";
+      }
+      std::cout << "(";
+      std::cout << ") -> " << value.some << std::endl;
+    }
+  }
+};
+
+// helper to get the tail of an index_sequence from some element onwards
+template <size_t Index, typename Seq> struct tail;
+
+template <size_t Head, size_t... Tail>
+struct tail<0, std::index_sequence<Head, Tail...>> {
+  using type = std::index_sequence<Head, Tail...>;
+};
+
+template <> struct tail<0, std::index_sequence<>> {
+  using type = std::index_sequence<>;
+};
+
+template <size_t Index, size_t Head, size_t... Tail>
+struct tail<Index, std::index_sequence<Head, Tail...>> {
+  using type = typename tail<Index - 1, std::index_sequence<Tail...>>::type;
+};
+
+template <class IT, class NT, bool Root, bool LeafCover, size_t N, size_t... Ns,
+          size_t... Ps>
+class StaticLazyTrie<IT, NT, Root, LeafCover, std::index_sequence<N, Ns...>,
+                     std::index_sequence<Ps...>> {
+  // Make friends.
+  template <class IT2, class NT2, bool R, bool LC, typename S, typename P>
+  friend class StaticLazyTrie;
+
+  Columnar<IT, NT> *data;
+
+  template <typename T> using ptr = std::unique_ptr<T>;
+  template <typename T> using vector = std::vector<T>;
+  template <typename T, size_t M> using array = std::array<T, M>;
+  template <size_t... is> using iseq = std::index_sequence<is...>;
+
+  static constexpr bool LastLevel = sizeof...(Ns) == 0;
+
+  using ChildPs = typename tail<N, iseq<Ps...>>::type;
+  using ChildTrie =
+      StaticLazyTrie<IT, NT, false, LeafCover, iseq<Ns...>, ChildPs>;
+  using Map = StaticHashTable<IT, ChildTrie, N>;
+  using Tuple = array<IT, N>;
+
+  ptr<StaticHashTable<IT, ChildTrie, N>> map;
+  ptr<vector<size_t>> vec;
+
+  // helper function to get the j-th element of Ps
+  template <size_t j> static constexpr size_t P() {
+    return std::get<j>(std::make_tuple(Ps...));
+  }
+
+  // Helper function to write out a tuple from the data.
+  // Loop over the N variables and write the data to the out array using P.
+  template <size_t... is>
+  void writeTuple(size_t item, array<IT, N> &out, std::index_sequence<is...>) {
+    (..., (out[is] = data->dim(P<is>())[item]));
+  }
+
+public:
+  StaticLazyTrie() = default;
+
+  StaticLazyTrie(StaticLazyTrie &&other) = default;
+
+  // Move assignment
+  StaticLazyTrie &operator=(StaticLazyTrie &&other) = default;
+
+  StaticLazyTrie(Columnar<IT, NT> *data) : data(data) {
+    if constexpr (Root) {
+      vec = nullptr;
+    } else {
+      vec = std::make_unique<vector<size_t>>();
+    }
+  }
+
+  template <class ITOut, class NTOut>
+  void iter(size_t idx, array<ITOut, N> &out, Value<NTOut> &val) {
+    if (map) {
+      map->iter(idx, out);
+    } else if constexpr (LastLevel && LeafCover) {
+      size_t item = Root ? idx : (*vec)[idx];
+      writeTuple(item, out, std::make_index_sequence<N>{});
+      if constexpr (!(std::is_void<NTOut>::value || std::is_void<NT>::value)) {
+        val.some = *data->val(item);
+      }
+    } else {
+      force();
+      map->iter(idx, out);
+    }
+  }
+
+  ChildTrie *lookup(Tuple &key) {
+    if (!map) {
+      force();
+    }
+    auto result = map->lookup(key);
+    return result;
+  }
+
+  size_t getIterSize() {
+    if (map) {
+      return map->getSize();
+    } else if constexpr (LastLevel && LeafCover) {
+      return Root ? data->getSize() : vec->size();
+    } else {
+      force();
+      return map->getSize();
+    }
+  }
+
+  size_t getMapSize() {
+    if (!map) {
+      force();
+    }
+    return map->getSize();
+  }
+
+  size_t getEstimatedSize() const {
+    if (map) {
+      return map->getSize();
+    } else {
+      return Root ? data->getSize() : vec->size();
+    }
+  }
+
+  void print(size_t level = 0) {
+    const size_t size = getIterSize();
+    Tuple key;
+    for (size_t i = 0; i < size; ++i) {
+      Value<NT> value;
+      iter(i, key, value);
+      for (size_t j = 0; j < level; ++j) {
+        std::cout << "    ";
+      }
+      std::cout << "(";
+      if (N > 0) {
+        std::cout << key[0];
+      }
+      for (size_t j = 1; j < N; ++j) {
+        std::cout << ", " << key[j];
+      }
+      std::cout << ")";
+      if constexpr (LastLevel && LeafCover) {
+        std::cout << " -> " << value.some << std::endl;
+      } else {
+        std::cout << std::endl;
+        lookup(key)->print(level + 1);
+      }
+    }
+  }
+
+protected:
+  void force() {
+    if (map) {
+      return;
+    }
+
+    Tuple key;
+    map = std::make_unique<Map>();
+    if (Root) {
+      for (size_t index = 0; index < data->getSize(); index++) {
+        writeTuple(index, key, std::make_index_sequence<N>{});
+        if (map->lookup(key) == nullptr) {
+          map->emplace(key, ChildTrie(data));
+        }
+        map->lookup(key)->vec->push_back(index);
+      }
+    } else {
+      for (size_t index : *vec) {
+        writeTuple(index, key, std::make_index_sequence<N>{});
+        if (map->lookup(key) == nullptr) {
+          map->emplace(key, ChildTrie(data));
+        }
         map->lookup(key)->vec->push_back(index);
       }
       vec = nullptr;
