@@ -1,13 +1,242 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <memory>
 #include <space/format/Trie.h>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
 namespace space {
+
+namespace jit {
+
+using Id = size_t;
+
+// Free Join inputs:
+// - VO: number of output variables
+// - VP: number of bound variables in the output
+// - Tuple of StaticLazyTrie pointers corresponding to the relations
+// - Array of size VO for storing the output tuple
+// - List of nodes. A node is just a list of indices into the relations tuple.
+//   This list represented at compile time using a list of index_sequences
+
+// NodeList type. Stores a list of index_sequences.
+template <typename... Seqs> struct NodeList;
+
+template <Id... H, typename... T>
+struct NodeList<std::index_sequence<H...>, T...> {
+  using Head = std::index_sequence<H...>;
+  using Tail = NodeList<T...>;
+};
+
+template <Id... H> struct NodeList<std::index_sequence<H...>> {
+  using Head = std::index_sequence<H...>;
+  using Tail = NodeList<>;
+};
+
+using std::array;
+using std::get;
+using std::index_sequence;
+using std::tuple;
+
+// template metaprogramming stuff
+namespace fn {
+
+// helper to apply a function to each trie in the given index sequence
+template <typename Seq, typename Ts> struct Apply;
+
+template <Id... Is, typename... Ts>
+struct Apply<index_sequence<Is...>, tuple<Ts...>> {
+  template <typename F> static void run(const tuple<Ts...> &tries, F &&f) {
+    (f(get<Is>(tries), std::integral_constant<Id, Is>()), ...);
+  }
+};
+
+template <typename Seq, typename Ts> struct ApplyUntil;
+
+template <Id... Is, typename... Ts>
+struct ApplyUntil<index_sequence<Is...>, tuple<Ts...>> {
+  template <typename F> static bool run(const tuple<Ts...> &tries, F &&f) {
+    return (f(get<Is>(tries), std::integral_constant<Id, Is>()) || ...);
+  }
+};
+
+// helper to map a function over each trie in the given index sequence
+template <typename Seq, typename Ts> struct Map;
+
+template <Id... Is, typename... Ts>
+struct Map<index_sequence<Is...>, tuple<Ts...>> {
+  template <typename F> static auto run(const tuple<Ts...> &tries, F &&f) {
+    return std::make_tuple(
+        f(get<Is>(tries), std::integral_constant<Id, Is>())...);
+  }
+};
+
+// helper to check if a number shows up in an index sequence
+template <Id I, typename Seq> struct Contains;
+
+template <Id I, Id H, Id... T> struct Contains<I, index_sequence<H, T...>> {
+  static constexpr bool value =
+      I == H || Contains<I, index_sequence<T...>>::value;
+};
+
+template <Id I> struct Contains<I, index_sequence<>> {
+  static constexpr bool value = false;
+};
+
+} // namespace fn
+
+template <class IT, class NT, int VO, typename Tries, typename Nodes>
+struct FreeJoin;
+
+// base case: no nodes
+template <class IT, class NT, int VO, typename... Tries>
+struct FreeJoin<IT, NT, VO, tuple<Tries...>, NodeList<>> {
+  template <class Output>
+  static void run(const tuple<Tries...> &tries, array<IT, VO> &tuple,
+                  Value<NT> &value, Output &&output) {
+    output(tuple, value);
+  }
+};
+
+template <class IT, class NT, int VO, typename... Tries, typename... Nodes>
+struct FreeJoin<IT, NT, VO, tuple<Tries...>, NodeList<Nodes...>> {
+  static constexpr size_t num_tries = sizeof...(Tries);
+
+  using AllTries = tuple<Tries...>;
+  using AllTriesSeq = std::make_index_sequence<num_tries>;
+  using Node = typename NodeList<Nodes...>::Head;
+  using NodeSeq = std::make_index_sequence<Node::size()>;
+
+  template <class T> using rpt = std::remove_pointer_t<T>;
+
+  template <size_t Out, size_t In, size_t... Perm, size_t... Iota>
+  static void project(array<IT, Out> &out, const array<IT, In> &in,
+                      index_sequence<Perm...>, index_sequence<Iota...>) {
+    static_assert(sizeof...(Perm) == sizeof...(Iota),
+                  "permutation size mismatch");
+    static_assert(sizeof...(Perm) <= Out, "output size too small");
+    static_assert(sizeof...(Perm) <= In, "input size too small");
+    // print
+    // (..., (std::cout << Perm << " = in[" << Iota << "] = " << in[Iota]));
+    // std::cout << std::endl;
+    (..., (out[Perm] = in[Iota]));
+  }
+
+  template <size_t Out, size_t In, size_t... Perm>
+  static void scatter(array<IT, Out> &out, const array<IT, In> &in,
+                      index_sequence<Perm...> perm) {
+    project(out, in, perm, std::make_index_sequence<perm.size()>());
+  }
+
+  template <size_t Out, size_t In, size_t... Perm>
+  static void gather(array<IT, Out> &out, const array<IT, In> &in,
+                     index_sequence<Perm...> perm) {
+    project(out, in, std::make_index_sequence<perm.size()>(), perm);
+  }
+
+  // helper to merge the subtries into new_tries
+  // new_tries[Node[0]] = subtries[0] ...
+  template <typename OutSeq, typename InSeq> struct MergeTries;
+
+  template <size_t... Out, size_t... In>
+  struct MergeTries<index_sequence<Out...>, index_sequence<In...>> {
+    template <typename AllTries, typename Subtries>
+    static void run(AllTries &new_tries, Subtries &subtries) {
+      (..., (get<Out>(new_tries) = get<In>(subtries)));
+    }
+  };
+
+  template <class Output>
+  static void run(const AllTries &tries, array<IT, VO> &tuple, Value<NT> &value,
+                  Output &&output) {
+    auto node_tries = fn::Map<Node, AllTries>::run(
+        tries, [](auto trie, auto i) { return trie; });
+
+    constexpr size_t bound_vars =
+        rpt<std::tuple_element_t<0, decltype(node_tries)>>::num_vars;
+
+    // swap the minimal cover to the front
+    // FIXME: this doesn't work if the covers have different variable
+    // permutations... let's just assume they don't for now
+    size_t min_size = std::numeric_limits<size_t>::max();
+    fn::Apply<NodeSeq, decltype(node_tries)>::run(
+        node_tries, [&](auto trie, auto i) {
+          if constexpr (rpt<decltype(trie)>::num_vars == bound_vars) {
+            size_t size = trie->getEstimatedSize();
+            if (size < min_size) {
+              min_size = size;
+              std::swap(get<0>(node_tries), get<i>(node_tries));
+            }
+          }
+        });
+
+    auto cover = get<0>(node_tries);
+    Value<NT> v;
+
+    // iterate over the cover
+    const size_t iter_size = cover->getIterSize();
+    for (size_t item = 0; item < iter_size; ++item) {
+      auto new_tries =
+          fn::Map<AllTriesSeq, AllTries>::run(tries, [](auto trie, auto i) {
+            // if i is in node, return nullptr to child trie, otherwise self
+            if constexpr (fn::Contains<i, Node>::value) {
+              return static_cast<typename rpt<decltype(trie)>::ChildTrie *>(
+                  nullptr);
+            } else {
+              return trie;
+            }
+          });
+      auto subtries = fn::Map<NodeSeq, decltype(node_tries)>::run(
+          node_tries, [](auto trie, auto i) {
+            return static_cast<typename rpt<decltype(trie)>::ChildTrie *>(
+                nullptr);
+          });
+      // probe the remaining tries in the node
+      if (fn::ApplyUntil<NodeSeq, decltype(node_tries)>::run(
+              node_tries, [&](auto trie, auto i) -> bool {
+                if constexpr (i == 0) {
+                  // iterate over the cover
+                  typename rpt<decltype(trie)>::Tuple cover_tuple;
+                  trie->iter(item, cover_tuple, v);
+                  // write cover tuple into the output tuple
+                  scatter(tuple, cover_tuple,
+                          typename rpt<decltype(trie)>::OutPerm());
+                  if (trie->last_level) {
+                    value.some *= v.some;
+                    get<i>(subtries) = nullptr;
+                  } else {
+                    get<i>(subtries) = trie->lookup(cover_tuple);
+                  }
+                  return false;
+                } else {
+                  // probe the other tries
+                  typename rpt<decltype(trie)>::Tuple key;
+                  gather(key, tuple, typename rpt<decltype(trie)>::OutPerm());
+                  auto subtrie = trie->lookup(key);
+                  if (!subtrie) {
+                    return true;
+                  }
+                  get<i>(subtries) = subtrie;
+                  return false;
+                }
+              })) {
+        continue;
+      }
+      // merge
+      MergeTries<Node, NodeSeq>::run(new_tries, subtries);
+      // recurse
+      FreeJoin<IT, NT, VO, decltype(new_tries),
+               typename NodeList<Nodes...>::Tail>::run(new_tries, tuple, value,
+                                                       output);
+    }
+  }
+};
+
+} // namespace jit
 
 struct Atom {
   Variable relation;
@@ -29,8 +258,8 @@ using std::unordered_map;
 using std::unordered_set;
 using std::vector;
 
-// Trying to pre-allocate stuff. Trying to outsmart the allocator. This probably
-// just makes things worse, but I'm in too deep now!
+// Trying to pre-allocate stuff. Trying to outsmart the allocator. This
+// probably just makes things worse, but I'm in too deep now!
 template <class IT, class NT> struct FJAux {
   struct FrameAux {
     unique_ptr<Dim[]> trie_perm;
@@ -76,8 +305,8 @@ struct FJ {
     FJ fj;
 
     // Collect head variables from covers; this is our output schema.
-    // For now it is flattened (i.e. columnar) but one could feasibly return it
-    // as in factorized form as a trie.
+    // For now it is flattened (i.e. columnar) but one could feasibly return
+    // it as in factorized form as a trie.
     unordered_map<Variable, size_t> var_to_idx;
     for (const auto &node : plan) {
       const auto &atom = node[0];
@@ -263,7 +492,8 @@ bool isValidPlan(const vector<Relation<IT, NT>> &relations,
                   << " appears multiple times in the same node" << std::endl;
         return false;
       }
-      // check that all variables are bound at most once, and atom 0 is a cover
+      // check that all variables are bound at most once, and atom 0 is a
+      // cover
       seen_rels.insert(atom.relation);
       for (const auto &var : atom.vars) {
         if (!cover_vars.count(var)) {

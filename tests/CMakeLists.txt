@@ -1,7 +1,8 @@
 # helper function to add a test
 function(add_test name)
-    add_executable(test-${name} ${name}.cpp)
+    add_executable(test-${name} ${name}.cpp ${HEADERS})
     target_compile_options(test-${name} PRIVATE -Wall -Wextra -pedantic -Werror -Wno-unused-parameter -fno-omit-frame-pointer)
+    target_link_libraries(test-${name} PRIVATE "${GRAPHBLAS_LIB}")
 endfunction()
 
 add_test(HashTable)

@@ -84,9 +84,11 @@ public:
     return result;
   }
 
-  [[gnu::always_inline]] IT *dim(size_t i) { return &dims[size * i]; }
+  IT *dim(size_t i) { return &dims[size * i]; }
+  IT *dim(size_t i) const { return &dims[size * i]; }
 
-  [[gnu::always_inline]] NT *val(size_t i) { return &values.data[i]; }
+  NT *val(size_t i) { return &values.data[i]; }
+  NT *val(size_t i) const { return &values.data[i]; }
 
   size_t getSize() const { return size; }
   size_t getRank() const { return rank; }

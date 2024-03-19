@@ -2,7 +2,10 @@
 #include <chrono>
 #include <cmath>
 #include <space/algorithm/FreeJoin.h>
+#include <space/util/GB.h>
 #include <vector>
+
+#include <GraphBLAS.h>
 
 #include "Util.h"
 
@@ -82,11 +85,14 @@ void testER() {
     Ns.push_back(i);
   }
 
-  // auto plan = parsePlan("[R(x, y), S(y), T(x)], [S(z), T(z)]");
-  auto plan = parsePlan("[R(x), T(x)], [R(y), S(y)], [S(z), T(z)]");
+  auto plan = parsePlan("[R(x, y), S(y), T(x)], [S(z), T(z)]");
+  // auto plan = parsePlan("[R(x), T(x)], [R(y), S(y)], [S(z), T(z)]");
   // auto plan = parsePlan("[R(x, y), S(y)], [S(z), T(z)]");
 
-  std::cout << "n,m,triangles,time_s" << std::endl;
+  std::cout << "engine,n,m,triangles,time_s" << std::endl;
+
+  GrB_init(GrB_NONBLOCKING);
+  GxB_Context_set(GxB_CONTEXT_WORLD, GxB_CONTEXT_NTHREADS, 1);
 
   for (auto N : Ns) {
     auto data = Columnar<IT, NT>(erdosRenyi<IT, NT>(N, p));
@@ -95,7 +101,7 @@ void testER() {
     // std::cout << "Edges: " << M << std::endl;
     // std::cout << "Triangle upper bound: " << (size_t)std::pow(M, 1.5)
     //           << std::endl;
-    std::cout << N << "," << M << ",";
+    std::cout << "fj," << N << "," << M << ",";
 
     auto R = Relation<IT, NT>{"R", {"x", "y"}, &data};
     auto S = Relation<IT, NT>{"S", {"y", "z"}, &data};
@@ -118,6 +124,24 @@ void testER() {
       exit(1);
     }
     // std::cout << "Triangles: " << triangles / 6 << std::endl;
+
+    GrB_Matrix A = util::toGraphBLAS<IT, NT>(data, false);
+
+    std::cout << "gb," << N << "," << M << ",";
+    GrB_Matrix C;
+    GrB_Matrix_new(&C, util::GraphBLASType<NT>::type(), N, N);
+    start = std::chrono::high_resolution_clock::now();
+    GrB_mxm(C, A, GrB_NULL, GrB_PLUS_TIMES_SEMIRING_FP64, A, A, GrB_NULL);
+    double gb_triangles;
+    GrB_Matrix_reduce_FP64(&gb_triangles, GrB_NULL, GrB_PLUS_MONOID_FP64, C,
+                           GrB_NULL);
+    end = std::chrono::high_resolution_clock::now();
+    elapsed_seconds = end - start;
+    std::cout << gb_triangles << "," << elapsed_seconds.count() << std::endl;
+
+    // free A, C
+    GrB_Matrix_free(&A);
+    GrB_Matrix_free(&C);
   }
 }
 
@@ -157,8 +181,87 @@ void testWorstCase() {
   }
 }
 
+void testJIT() {
+  {
+    std::cout << "[R(x,y), S(y)], [S(z)]" << std::endl;
+    constexpr int VO = 3;
+    auto data = Columnar<IT, NT>(erdosRenyi<IT, NT>(4, 1.0));
+
+    StaticLazyTrie<IT, NT, true, true, std::index_sequence<2>,
+                   std::index_sequence<0, 1>, std::index_sequence<0, 1>>
+        R(&data);
+
+    static_assert(decltype(R)::OutPerm::size() == 2, "R perm size");
+
+    StaticLazyTrie<IT, NT, true, true, std::index_sequence<1, 1>,
+                   std::index_sequence<1, 0>, std::index_sequence<1, 2>>
+        S(&data);
+
+    std::tuple<decltype(R) *, decltype(S) *> rels(&R, &S);
+    std::array<IT, 3> tup;
+    Value<NT> val;
+
+    auto output = [](std::array<IT, 3> &tup, Value<NT> &val) {
+      std::cout << "output: " << tup[0] << ", " << tup[1] << ", " << tup[2]
+                << " -> " << val.some << std::endl;
+    };
+    jit::FreeJoin<IT, NT, VO, decltype(rels),
+                  jit::NodeList<std::index_sequence<0, 1>,
+                                std::index_sequence<1>>>::run(rels, tup, val,
+                                                              output);
+  }
+
+  // {
+  //   std::cout << "[R(x,y)], [S(z)]" << std::endl;
+  //   constexpr int VO = 3;
+  //   constexpr int VP = 0;
+  //   auto data = Columnar<IT, NT>(erdosRenyi<IT, NT>(3, 1.0));
+
+  //   StaticLazyTrie<IT, NT, true, true, std::index_sequence<2>,
+  //                  std::index_sequence<0, 1>>
+  //       R(&data);
+
+  //   StaticLazyTrie<IT, NT, true, true, std::index_sequence<1>,
+  //                  std::index_sequence<0>>
+  //       S(&data);
+
+  //   std::tuple<decltype(R) *, decltype(S) *> rels(&R, &S);
+  //   std::array<IT, 3> tup;
+  //   Value<NT> val;
+
+  //   jit::FreeJoin<IT, NT, VO, VP, decltype(rels),
+  //                 jit::NodeList<std::index_sequence<0>,
+  //                               std::index_sequence<1>>>::run(rels, tup,
+  //                               val);
+  // }
+
+  // {
+  //   std::cout << "[R(x,y), S(x,y)]" << std::endl;
+  //   constexpr int VO = 2;
+  //   auto data1 = Columnar<IT, NT>(erdosRenyi<IT, NT>(3, 1.0));
+  //   auto data0 = Columnar<IT, NT>(erdosRenyi<IT, NT>(10, 1.0));
+
+  //   StaticLazyTrie<IT, NT, true, true, std::index_sequence<2>,
+  //                  std::index_sequence<0, 1>, std::index_sequence<0, 1>>
+  //       R(&data0);
+
+  //   StaticLazyTrie<IT, NT, true, true, std::index_sequence<2>,
+  //                  std::index_sequence<0, 1>, std::index_sequence<0, 1>>
+  //       S(&data1);
+
+  //   std::tuple<decltype(R) *, decltype(S) *> rels(&R, &S);
+  //   std::array<IT, 2> tup;
+  //   Value<NT> val;
+
+  //   jit::FreeJoin<IT, NT, VO, decltype(rels),
+  //                 jit::NodeList<std::index_sequence<0, 1>>>::run(rels, tup,
+  //                                                                val);
+  // }
+}
+
 int main(int argc, char **argv) {
-  testER();
+  // testER();
   // testWorstCase();
+  testJIT();
   return 0;
 }
