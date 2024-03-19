@@ -214,7 +214,6 @@ bool test_2_static() {
   Value v;
   t1 = std::chrono::high_resolution_clock::now();
   for (size_t i = 0; i < N; i++) {
-    // ht.iter(i, out.data(), &v);
     ht.iter(i, out, v);
     if (v != static_cast<Value>(out[0])) {
       std::cerr << "wrong value: " << out[0] << std::endl;

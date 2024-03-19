@@ -156,23 +156,23 @@ struct FreeJoin<IT, NT, VO, tuple<Tries...>, NodeList<Nodes...>> {
     auto node_tries = fn::Map<Node, AllTries>::run(
         tries, [](auto trie, auto i) { return trie; });
 
-    constexpr size_t bound_vars =
-        rpt<std::tuple_element_t<0, decltype(node_tries)>>::num_vars;
+    // constexpr size_t bound_vars =
+    //     rpt<std::tuple_element_t<0, decltype(node_tries)>>::num_vars;
 
     // swap the minimal cover to the front
     // FIXME: this doesn't work if the covers have different variable
     // permutations... let's just assume they don't for now
-    size_t min_size = std::numeric_limits<size_t>::max();
-    fn::Apply<NodeSeq, decltype(node_tries)>::run(
-        node_tries, [&](auto trie, auto i) {
-          if constexpr (rpt<decltype(trie)>::num_vars == bound_vars) {
-            size_t size = trie->getEstimatedSize();
-            if (size < min_size) {
-              min_size = size;
-              std::swap(get<0>(node_tries), get<i>(node_tries));
-            }
-          }
-        });
+    // size_t min_size = std::numeric_limits<size_t>::max();
+    // fn::Apply<NodeSeq, decltype(node_tries)>::run(
+    //     node_tries, [&](auto trie, auto i) {
+    //       if constexpr (rpt<decltype(trie)>::num_vars == bound_vars) {
+    //         size_t size = trie->getEstimatedSize();
+    //         if (size < min_size) {
+    //           min_size = size;
+    //           std::swap(get<0>(node_tries), get<i>(node_tries));
+    //         }
+    //       }
+    //     });
 
     auto cover = get<0>(node_tries);
     Value<NT> v;
