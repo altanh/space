@@ -57,7 +57,7 @@ void printTrie(LazyTrie<IT, NT> &trie, size_t level, size_t max_level) {
   }
 }
 
-int main() {
+void test() {
   auto coo = vector<array<IT, 3>>{
       {1, 2, 3},
       {1, 2, 6},
@@ -113,6 +113,28 @@ int main() {
                  std::index_sequence<2, 1, 0>>
       st2(&data);
   st2.print();
+}
 
+void test_jit() {
+  auto coo = vector<array<IT, 3>>{
+      {1, 2, 3},
+      {1, 2, 6},
+      {7, 8, 9},
+  };
+  auto data = jit::Columnar<IT, NT, 3>::fromCOO(
+      coo, [](auto i, auto t) { return t[0] + t[1] + t[2]; });
+
+  // [x, y], [z]
+  jit::LazyTrie<IT, NT, fn::List<2, 1>, fn::CountTo<3>, 3> st(&data);
+  st.print();
+
+  std::tuple<int, int> t = {1, 2};
+  std::tuple<float, float> t2 = fn::Apply(t, [](auto x) { return x + 1.1f; });
+  fn::Apply(t, [](auto x) { std::cout << x << std::endl; });
+  fn::Apply(t2, [](auto x) { std::cout << x << std::endl; });
+}
+
+int main() {
+  test_jit();
   return 0;
 }

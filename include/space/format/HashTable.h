@@ -299,6 +299,9 @@ public:
     val = static_cast<ValueOut>(values[packed[idx]]);
   }
 
+  Value *iter(size_t idx) { return &values[packed[idx]]; }
+
+  // TODO: standardize naming
   size_t getSize() { return size; }
 
   size_t getCapacity() { return capacity; }
@@ -306,7 +309,7 @@ public:
   size_t getMemoryUsage() { return capacity * entry_size; }
 
 protected:
-  [[gnu::always_inline]] bool keyEquals(const Tuple &x, const Tuple &y) {
+  bool keyEquals(const Tuple &x, const Tuple &y) {
     for (size_t i = 0; i < TupleSize; i++) {
       if (x[i] != y[i]) {
         return false;

@@ -6,10 +6,12 @@
 #include <string>
 #include <unordered_map>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include "Columnar.h"
 #include "HashTable.h"
+#include <space/util/Fn.h>
 
 namespace space {
 
@@ -257,6 +259,291 @@ protected:
     }
   }
 };
+
+namespace jit {
+
+using namespace fn;
+
+template <class IT, class NT, typename Schema, typename Variables, size_t Rank,
+          bool Root = true, size_t Bound = 0>
+class LazyTrie;
+
+// Base case: empty schema
+template <class IT, class NT, bool Root, size_t Rank, size_t Bound,
+          size_t... Vs>
+class LazyTrie<IT, NT, Nil, List<Vs...>, Rank, Root, Bound> {
+public:
+  using Variables = Nil;
+  using Tuple = std::array<IT, 0>;
+
+private:
+  template <class IT2, class NT2, typename S, typename V, size_t Ra, bool Ro,
+            size_t B>
+  friend class LazyTrie;
+
+  Value<NT> value_;
+
+public:
+  LazyTrie() = default;
+  LazyTrie(LazyTrie &&other) = default;
+  LazyTrie &operator=(LazyTrie &&other) = default;
+  LazyTrie(Columnar<IT, NT, Rank> *data) = delete;
+  LazyTrie(Columnar<IT, NT, Rank> *data, size_t index) {
+    if constexpr (!std::is_void_v<NT>) {
+      value_.some = data->value(index);
+    }
+  }
+
+  void push(size_t index) {
+    // should be unreachable
+    throw std::runtime_error("push called on leaf trie");
+  }
+
+  template <class ITOut, class NTOut>
+  void iter(size_t idx, Tuple &out, Value<NTOut> &val) {
+    // idx unused, only one element in leaf tries
+    if constexpr (!(std::is_void_v<NTOut> || std::is_void_v<NT>)) {
+      val.some = static_cast<NTOut>(value_.some);
+    }
+  }
+
+  Value<NT> &value() { return value_; }
+
+  size_t iterSize() { return 1; }
+
+  size_t mapSize() { return 0; }
+
+  size_t estimatedSize() { return 1; }
+
+  void print(size_t level = 0) {
+    for (size_t j = 0; j < level; ++j) {
+      std::cout << "    ";
+    }
+    std::cout << "()";
+    if constexpr (!std::is_void_v<NT>) {
+      std::cout << " -> " << value_.some;
+    }
+    std::cout << std::endl;
+  }
+
+  void materialize() {}
+};
+
+// Recursive case
+
+// template <class IT, class NT, typename Schema, typename Variables, size_t
+// Rank,
+//           bool Root = true>
+// class LazyTrie;
+
+template <class IT, class NT, size_t Rank, size_t Bound, bool Root, size_t N,
+          size_t... Ns, size_t... Vs>
+class LazyTrie<IT, NT, List<N, Ns...>, List<Vs...>, Rank, Root, Bound> {
+public:
+  using Variables = typename Take<N, List<Vs...>>::T;
+  using Tuple = std::array<IT, N>;
+  static_assert(Variables::size() == N, "Variables size mismatch");
+  using ChildSchema = List<Ns...>;
+  using ChildVariables = typename Tail<N, List<Vs...>>::T;
+  using ChildTrie =
+      LazyTrie<IT, NT, ChildSchema, ChildVariables, Rank, false, Bound + N>;
+
+private:
+  template <class IT2, class NT2, typename S, typename V, size_t Ra, bool Ro,
+            size_t Re>
+  friend class LazyTrie;
+
+  using ProjectionSeq = typename Range<Bound, Bound + N>::T;
+
+  using Map = StaticHashTable<IT, ChildTrie, N>;
+
+  // Could use a variant, but might honestly be clunkier.
+  std::unique_ptr<Map> map_;
+  std::unique_ptr<std::vector<size_t>> vec_;
+
+  Columnar<IT, NT, Rank> *data_;
+
+  template <size_t... Is, size_t... Cs>
+  void writeTuple(size_t item, std::array<IT, N> &out, List<Is...>,
+                  List<Cs...>) {
+    (..., (out[Is] = data_->column(Cs)[item]));
+  }
+
+  void writeTuple(size_t item, std::array<IT, N> &out) {
+    writeTuple(item, out, CountTo<N>{}, ProjectionSeq{});
+  }
+
+public:
+  LazyTrie() = default;
+
+  LazyTrie(LazyTrie &&other) = default;
+
+  // Move assignment
+  LazyTrie &operator=(LazyTrie &&other) = default;
+
+  LazyTrie(Columnar<IT, NT, Rank> *data) : data_(data) {
+    map_ = nullptr;
+    if constexpr (Root) {
+      vec_ = nullptr;
+    } else {
+      vec_ = std::make_unique<std::vector<size_t>>();
+    }
+  }
+
+  LazyTrie(Columnar<IT, NT, Rank> *data, size_t index) : data_(data) {
+    vec_ = std::make_unique<std::vector<size_t>>();
+    vec_->push_back(index);
+  }
+
+  template <class ITOut, class NTOut>
+  void iter(size_t idx, std::array<ITOut, N> &out, Value<NTOut> &val) {
+    if (map_) {
+      map_->iter(idx, out);
+    } else if constexpr (lastLevel()) {
+      size_t item = Root ? idx : (*vec_)[idx];
+      writeTuple(item, out);
+      if constexpr (!(std::is_void_v<NTOut> || std::is_void_v<NT>)) {
+        val.some = data_->value(item);
+      }
+    } else {
+      force();
+      map_->iter(idx, out);
+    }
+  }
+
+  ChildTrie *lookup(const Tuple &key) {
+    if (!map_) {
+      force();
+    }
+    return map_->lookup(key);
+  }
+
+  size_t iterSize() {
+    if (map_) {
+      return map_->getSize();
+    } else if constexpr (lastLevel()) {
+      return Root ? data_->size() : vec_->size();
+    } else {
+      force();
+      return map_->getSize();
+    }
+  }
+
+  size_t mapSize() {
+    if (!map_) {
+      force();
+    }
+    return map_->getSize();
+  }
+
+  size_t estimatedSize() const {
+    if (map_) {
+      return map_->getSize();
+    } else {
+      return Root ? data_->size() : vec_->size();
+    }
+  }
+
+  void print(size_t level = 0) {
+    const size_t size = iterSize();
+    Tuple key;
+    for (size_t i = 0; i < size; ++i) {
+      Value<NT> value;
+      iter(i, key, value);
+      for (size_t j = 0; j < level; ++j) {
+        std::cout << "    ";
+      }
+      std::cout << "(";
+      if (N > 0) {
+        std::cout << key[0];
+      }
+      for (size_t j = 1; j < N; ++j) {
+        std::cout << ", " << key[j];
+      }
+      std::cout << ")";
+      if constexpr (lastLevel()) {
+        std::cout << " -> " << value.some << std::endl;
+      } else {
+        std::cout << std::endl;
+        lookup(key)->print(level + 1);
+      }
+    }
+  }
+
+  static constexpr bool lastLevel() { return ChildSchema::size() == 0; }
+
+  void materialize() {
+    if (map_) {
+      return;
+    }
+
+    Tuple key;
+    map_ = std::make_unique<Map>();
+    if (Root) {
+      for (size_t index = 0; index < data_->size(); index++) {
+        writeTuple(index, key);
+        ChildTrie *child = map_->lookup(key);
+        if (child) {
+          child->push(index);
+        } else {
+          map_->emplace(key, ChildTrie(data_, index));
+        }
+      }
+    } else {
+      for (size_t index : *vec_) {
+        writeTuple(index, key);
+        ChildTrie *child = map_->lookup(key);
+        if (child) {
+          child->push(index);
+        } else {
+          map_->emplace(key, ChildTrie(data_, index));
+        }
+      }
+      vec_ = nullptr;
+      // iterate over children and materialize
+      const size_t map_size = map_->getSize();
+      for (size_t i = 0; i < map_size; i++) {
+        map_->iter(i)->materialize();
+      }
+    }
+  }
+
+protected:
+  void push(size_t index) { vec_->push_back(index); }
+
+  void force() {
+    if (map_) {
+      return;
+    }
+
+    Tuple key;
+    map_ = std::make_unique<Map>();
+    if (Root) {
+      for (size_t index = 0; index < data_->size(); index++) {
+        writeTuple(index, key);
+        ChildTrie *child = map_->lookup(key);
+        if (child) {
+          child->push(index);
+        } else {
+          map_->emplace(key, ChildTrie(data_, index));
+        }
+      }
+    } else {
+      for (size_t index : *vec_) {
+        writeTuple(index, key);
+        ChildTrie *child = map_->lookup(key);
+        if (child) {
+          child->push(index);
+        } else {
+          map_->emplace(key, ChildTrie(data_, index));
+        }
+      }
+      vec_ = nullptr;
+    }
+  }
+};
+
+} // namespace jit
 
 // Trie with compile-time schema, provided as a parameter pack of ints
 // Schema[i] is the number of variables at level i.

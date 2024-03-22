@@ -6,6 +6,8 @@
 #include <tuple>
 #include <vector>
 
+#include "Util.h"
+
 using IT = uint64_t;
 using NT = double;
 using std::array;
@@ -93,11 +95,45 @@ bool test_no_value() {
   return true;
 }
 
+bool test_jit() {
+  jit::Columnar<IT, NT, 3> data(3);
+
+  data.column(0)[2] = 1;
+  data.column(1)[1] = 2;
+  data.column(2)[0] = 3;
+  data.value(0) = 6.0;
+  data.print();
+
+  std::cout << std::endl;
+
+  auto row = data.row(2);
+  row[0] = 7;
+  row[1] = 7;
+  row[2] = 7;
+  row.value() = 777;
+  data.print();
+
+  std::cout << std::endl;
+
+  data = data.permute({0, 2, 1});
+  data.print();
+
+  std::cout << std::endl;
+
+  auto graph = erdosRenyi2<IT, NT>(25, 0.25);
+  graph.print();
+
+  return true;
+}
+
 int main() {
   if (!test_coo()) {
     return 1;
   }
   if (!test_no_value()) {
+    return 1;
+  }
+  if (!test_jit()) {
     return 1;
   }
   return 0;

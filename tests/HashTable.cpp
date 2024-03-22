@@ -4,6 +4,7 @@
 #include <chrono>
 #include <iostream>
 #include <random>
+#include <space/util/Fn.h>
 #include <tuple>
 
 // WARNING: not a benchmark! just making sure things kinda work
