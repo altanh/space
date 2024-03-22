@@ -396,18 +396,21 @@ public:
   }
 
   template <class ITOut, class NTOut>
-  void iter(size_t idx, std::array<ITOut, N> &out, Value<NTOut> &val) {
+  ChildTrie *iter(size_t idx, std::array<ITOut, N> &out, Value<NTOut> &val) {
     if (map_) {
       map_->iter(idx, out);
+      return map_->iter(idx);
     } else if constexpr (lastLevel()) {
       size_t item = Root ? idx : (*vec_)[idx];
       writeTuple(item, out);
       if constexpr (!(std::is_void_v<NTOut> || std::is_void_v<NT>)) {
         val.some = data_->value(item);
       }
+      return nullptr;
     } else {
       force();
       map_->iter(idx, out);
+      return map_->iter(idx);
     }
   }
 

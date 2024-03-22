@@ -139,8 +139,10 @@ void testJIT() {
 }
 #else
 void testJIT() {
-  auto data = erdosRenyi2<IT, NT>(3100, 0.1);
-  auto data_T = data.permute({1, 0});
+  auto R_data = erdosRenyi2<IT, NT>(3100, 0.1);
+  auto S_data = erdosRenyi2<IT, NT>(3100, 0.08, 1);
+  auto T_data = erdosRenyi2<IT, NT>(3100, 0.3, 2);
+  // auto data_T = data.permute({1, 0});
 
   // [R(x), T(x)], [R(y), S(y)], [S(z), T(z)]
   // auto R = jit::LazyTrie<IT, NT, fn::List<1, 1>, fn::List<0, 1>, 2>(&data);
@@ -156,31 +158,44 @@ void testJIT() {
   std::vector<double> times;
 
   for (size_t i = 0; i < nwarm + nrun; ++i) {
-    auto R = jit::LazyTrie<IT, NT, fn::List<1, 1>, fn::List<0, 1>, 2>(&data);
-    auto S = jit::LazyTrie<IT, NT, fn::List<1, 1>, fn::List<1, 2>, 2>(&data_T);
-    auto T = jit::LazyTrie<IT, NT, fn::List<1, 1>, fn::List<0, 2>, 2>(&data);
+    constexpr size_t R = 0;
+    constexpr size_t S = 1;
+    constexpr size_t T = 2;
+    constexpr size_t X = 0;
+    constexpr size_t Y = 1;
+    constexpr size_t Z = 2;
+
+    auto R_trie =
+        jit::LazyTrie<IT, NT, fn::List<1, 1>, fn::List<X, Y>, 2>(&R_data);
+    auto S_trie =
+        jit::LazyTrie<IT, NT, fn::List<1, 1>, fn::List<Y, Z>, 2>(&S_data);
+    auto T_trie =
+        jit::LazyTrie<IT, NT, fn::List<1, 1>, fn::List<X, Z>, 2>(&T_data);
 
     // R.materialize();
     // S.materialize();
     // T.materialize();
 
-    auto rels = std::make_tuple(&R, &S, &T);
+    auto rels = std::make_tuple(&R_trie, &S_trie, &T_trie);
+
+    constexpr size_t batch_size = 128;
 
     NT count = 0;
     auto start = std::chrono::high_resolution_clock::now();
-    jit::FreeJoin<IT, NT, fn::List<0, 1, 2>,
-                  jit::Nodes<fn::List<0, 2>, fn::List<0, 1>, fn::List<1, 2>>>::
-        run(rels, tup, val, [&count](auto t, auto v) { ++count; });
+    jit::FreeJoin<IT, NT, fn::List<X, Y, Z>,
+                  jit::Nodes<fn::List<R, T>, fn::List<R, S>, fn::List<S, T>>,
+                  batch_size>::run(rels, tup, val,
+                                   [&count](auto t, auto v) { ++count; });
     auto end = std::chrono::high_resolution_clock::now();
     std::cout << "FreeJoin: " << count << " in "
               << std::chrono::duration_cast<std::chrono::milliseconds>(end -
                                                                        start)
                      .count()
               << "ms" << std::endl;
-    if (count % 6 != 0) {
-      std::cerr << "triangles should be divisible by 6" << std::endl;
-      exit(1);
-    }
+    // if (count % 6 != 0) {
+    //   std::cerr << "triangles should be divisible by 6" << std::endl;
+    //   exit(1);
+    // }
     if (i >= nwarm) {
       times.push_back(
           std::chrono::duration_cast<std::chrono::milliseconds>(end - start)
